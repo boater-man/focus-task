@@ -30,6 +30,10 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Install cargo-tauri CLI
+        shell: pwsh
+        run: cargo install tauri-cli --version "^2"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
