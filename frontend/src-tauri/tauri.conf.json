@@ -33,7 +33,7 @@
     "targets": "all",
     "resources": {
       "../../backend/todo.db": "seed/todo.db",
-      "../target/release/backend": "backend"
+      "target/release/backend": "backend"
     },
     "icon": [
       "icons/32x32.png",
