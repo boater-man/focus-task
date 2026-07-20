@@ -7,17 +7,24 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::Manager;
+
+#[cfg(target_os = "macos")]
+use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 
 const SERVICE_NAME: &str = "FocusTask";
 const TOKEN_ACCOUNT: &str = "auth_token";
 const USERNAME_ACCOUNT: &str = "auth_username";
 const BACKEND_PORT: &str = "18765";
-const BACKEND_BINARY: &str = "focus-task-backend";
 const BACKEND_RESOURCE_DIR: &str = "backend";
 const BACKEND_DB_NAME: &str = "todo.db";
 const BACKEND_SECRET_NAME: &str = "secret.key";
+
+/// Backend binary name: includes .exe on Windows
+#[cfg(target_os = "windows")]
+const BACKEND_BINARY: &str = "focus-task-backend.exe";
+#[cfg(not(target_os = "windows"))]
+const BACKEND_BINARY: &str = "focus-task-backend";
 
 static BACKEND_CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 
@@ -81,8 +88,6 @@ fn backend_health_ok() -> bool {
 }
 
 fn wait_for_backend() -> bool {
-    // A cold PyInstaller launch can spend several seconds extracting modules,
-    // and legacy desktop databases may also need an in-place schema repair.
     for _ in 0..150 {
         if backend_health_ok() {
             return true;
@@ -220,6 +225,26 @@ fn start_backend(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     let stdout = File::create(log_dir.join("backend.out.log"))?;
     let stderr = File::create(log_dir.join("backend.err.log"))?;
 
+    // On Windows, hide the console window for the backend process
+    #[cfg(target_os = "windows")]
+    let child = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new(&backend_path)
+            .current_dir(&app_data_dir)
+            .env("FOCUS_TASK_BACKEND_PORT", BACKEND_PORT)
+            .env(
+                "FOCUS_TASK_DATABASE_URL",
+                format!("sqlite:///{}", db_path.display()),
+            )
+            .env("FOCUS_TASK_SECRET_KEY", secret)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?
+    };
+
+    #[cfg(not(target_os = "windows"))]
     let child = Command::new(&backend_path)
         .current_dir(&app_data_dir)
         .env("FOCUS_TASK_BACKEND_PORT", BACKEND_PORT)
@@ -309,6 +334,18 @@ fn open_notification_settings() -> Result<(), String> {
         return Ok(());
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("powershell")
+            .args([
+                "-Command",
+                "Start-Process 'ms-settings:notifications'",
+            ])
+            .status()
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
     #[allow(unreachable_code)]
     Err("当前平台暂不支持直接打开通知设置".to_string())
 }
@@ -327,6 +364,27 @@ fn send_native_notification(payload: NativeNotificationPayload) -> Result<(), St
             .arg(script)
             .status()
             .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Use PowerShell toast notification on Windows
+        let escaped_title = payload.title.replace('"', "`\"");
+        let escaped_body = payload.body.replace('"', "`\"");
+        let script = format!(
+            r#"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$template = '<toast><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual></toast>'
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml($template)
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Focus Task').Show($toast)"#,
+            escaped_title, escaped_body
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .status();
         return Ok(());
     }
 
@@ -363,6 +421,33 @@ fn save_text_file(filename: String, content: String) -> Result<bool, String> {
             return Ok(false);
         }
         fs::write(path, content).map_err(|err| err.to_string())?;
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Use PowerShell Save-File dialog
+        let escaped_filename = filename.replace('"', "`\"");
+        let script = format!(
+            r#"Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.SaveFileDialog
+$dialog.Title = '导出 Focus Task 备份'
+$dialog.FileName = '{}'
+$dialog.Filter = 'JSON 文件 (*.json)|*.json|所有文件 (*.*)|*.*'
+$result = $dialog.ShowDialog()
+if ($result -eq 'OK') {{ $dialog.FileName }} else {{ '' }}"#,
+            escaped_filename
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .map_err(|err| err.to_string())?;
+
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            return Ok(false);
+        }
+        fs::write(&path, content).map_err(|err| err.to_string())?;
         return Ok(true);
     }
 
@@ -480,11 +565,20 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // On macOS: hide to menu bar on close
             #[cfg(target_os = "macos")]
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+            }
+            // On Windows: minimize to taskbar on close (standard Windows behavior)
+            #[cfg(target_os = "windows")]
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.minimize();
                 }
             }
         })
