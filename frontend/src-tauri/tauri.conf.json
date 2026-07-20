@@ -32,7 +32,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../../backend/todo.db": "seed/todo.db"
+      "../../backend/todo.db": "seed/todo.db",
+      "../target/release/backend": "backend"
     },
     "icon": [
       "icons/32x32.png",
