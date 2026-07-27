@@ -76,24 +76,7 @@ Focus Task 是一款以四象限任务管理为核心的轻量桌面任务工具
 | 后端 | Python FastAPI, SQLite, Alembic |
 | 构建 | GitHub Actions (Windows) / 本地脚本 (macOS) |
 
-## 开发
-
-```bash
-# 后端
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-
-# 前端
-cd frontend
-npm install
-npm run dev
-
-# Tauri 桌面端（需 Rust 环境）
-cd frontend/src-tauri
-cargo tauri dev
-```
-
 ## 许可证
 
 MIT
+
